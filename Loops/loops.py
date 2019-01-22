@@ -1,17 +1,21 @@
 if __name__ == '__main__':
-    n = raw_input()
     
-    if n.isdigit() and n >= 0:
-        for i in range(0, n):
+    n = int(input())
+    
+    if  n > 0:
+        for i in range(n):
             print (i**2)
+    elif n == 0:
+        print(n)
     else:
-        print ('Input an integer >= 0!')
+        print ('n must be >= 0!')
 
 
 
-    # if n.isdigit() and n >= 0:
+    # n = raw_input()
+    # if n.isdigit():
     #     i = 0
-    #     while i < int(n):
+    #     while i <= int(n):
     #         print(i**2)
     #         i +=1
     # else:
