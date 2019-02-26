@@ -2,11 +2,11 @@
 
 from datetime import datetime
 from decimal import Decimal
-import calendar
 import requests
 from lxml import html
 
 URL = 'https://apps.penguin.bg/fly/quote3.aspx'
+AIRPORTS_URL = 'http://www.flybulgarien.dk/en/'
 DATAPARAMS = {'lang': 'en', 'paxcount': '1', 'infcount': ''}
 
 
@@ -27,6 +27,7 @@ class Scraper(object):
         else:
             self.data_params['ow'] = ''
         self.url = URL
+        self.airports_url = AIRPORTS_URL
         self.flight_notfound_flag = False
         self.converted_flight_list = None
         self.result_flight_list = None
@@ -39,22 +40,51 @@ class Scraper(object):
 
     class WrongContentException(Exception):
         """This exception is raised when unexpected content received"""
+
         pass
 
-    def get_response(self):
+    class AirportCodeError(Exception):
+        """This exception is raised when requested airports are not available
+        on site"""
+
+        pass
+
+    @staticmethod
+    def get_response_text(url, parametres=''):
         """This function receives and returns a response from the site"""
 
-        response = requests.get(self.url, params=self.data_params)
+        response = requests.get(url, params=parametres)
         response.raise_for_status()
-        return response
+        return html.fromstring(response.text)
+
+    def check_available_airports(self):
+        """This function get a list of available airports from the site and
+        checks the requested data on the list"""
+
+        parsed = Scraper.get_response_text(self.airports_url)
+        path = '/html/body/div/div/div/form/dl/dd/select/option/@value'
+        airports_list = parsed.xpath(path)
+        depature_airports_set = set(filter(None, airports_list))
+        if self.data_params['aptcode1'] not in depature_airports_set:
+            raise self.AirportCodeError
+        arr_airports_url = (self.airports_url[:-3] + 'script/getcity/2-' +
+                            self.data_params['aptcode1'])
+        arrival_airports = Scraper.get_response_text(arr_airports_url)
+        arrival_airports = arrival_airports.xpath('text()')[0].split(',')
+        arrival_airports_list = []
+        for airport in arrival_airports:
+            arrival_airports_list.append(airport.strip('{}\n\t"')[:3])
+        if self.data_params['aptcode2'] not in arrival_airports_list:
+            raise self.AirportCodeError
 
     def parse_flights_table(self):
         """This function finds and saves all the cells of the table with available
-        flights to the list, and also sets the flag "flight_notfound_flag" in case
-        finding the message 'No available flights found.'"""
+        flights to the list, and also sets the flag "flight_notfound_flag"
+        in case finding the message 'No available flights found.'"""
 
-        parsed = html.fromstring(self.get_response().text)
-        tr_elements_list = parsed.xpath('//tr')
+        parsed = Scraper.get_response_text(self.url, self.data_params)
+        path = '/html/body/form/div/table[@id="flywiz"]/tr/td/table/tr'
+        tr_elements_list = parsed.xpath(path)
         tr_list = []
         try:
             for tr_element in tr_elements_list:
@@ -90,20 +120,34 @@ class Scraper(object):
         Then it trying to find all the options for round-trip flights and
         saves them in the second list """
 
-        months_dict = dict((v, k) for k, v in enumerate(calendar.month_abbr))
         converted_flight_list = []
         result_flight_list = []
 
         for flight in flights_lst:
-            date = flight[0].split(',')[1].split()
-            for flight_time in (flight[1], flight[2]):
-                flight.append(datetime(int('20' + date[2]),
-                                       int(months_dict[date[1]]),
-                                       int(date[0]), int(flight_time[:2])))
-            flight[5] = flight[5].split()[1:]
-            flight[5][0] = Decimal(flight[5][0])
-            del flight[:3]
-            converted_flight_list.append(flight)
+            date = datetime.strptime(flight[0].split(',')[1].strip(),
+                                     '%d %b %y')
+            depdate = datetime.strptime(self.data_params['depdate'],
+                                        '%d.%m.%Y')
+            if 'rtdate' in self.data_params:
+                rtdate = datetime.strptime(self.data_params['rtdate'],
+                                           '%d.%m.%Y')
+            else:
+                rtdate = None
+
+            if (date == depdate and
+                    self.data_params['aptcode1'] in flight[3] or
+                    date == rtdate and
+                    self.data_params['aptcode2'] in flight[3]):
+
+                for flight_time in (flight[1], flight[2]):
+                    date = date.replace(hour=int(flight_time[:2]),
+                                        minute=int(flight_time[3:]))
+                    flight.append(date)
+
+                flight[5] = flight[5].split()[1:]
+                flight[5][0] = Decimal(flight[5][0])
+                del flight[:3]  # deleting old format data from flight the list
+                converted_flight_list.append(flight)
         self.converted_flight_list = converted_flight_list
 
         for i, flight in enumerate(converted_flight_list):
@@ -134,6 +178,7 @@ Flight duration: {}".format(dep_airport,
         handles arising errors """
 
         try:
+            self.check_available_airports()
             self.sort_flights_list(self.get_flights_list())
             if self.flight_notfound_flag:
                 mes1 = "Flights found only in one direction:\n"
@@ -166,15 +211,17 @@ Flight duration: {}".format(dep_airport,
         except requests.exceptions.RequestException:
             print 'Network Connection Error!'
         except self.WrongContentException:
-            print "Unexpected content. \n\
-Apparently, incorrect request parameters\n"
+            print 'Unexpected content. \n\
+Apparently, incorrect request parameters\n'
+        except self.AirportCodeError:
+            print 'Requested airports are not available or do not exist\n'
 
 
 if __name__ == '__main__':
 
     FLIGHTS_DATA = [['BOJ', 'BLL', '22.07.2019', '29.07.2019'],
                     ['CPH', 'BOJ', '17.07.2019'],
-                    ['BOJ', 'CPH', '26.06.2019', '02.07.2030'],
+                    ['BOJ', 'CPH', '27.06.2019', '02.07.2030'],
                     ['##', '^^^', '$$$$', '&&&&&'],
                     ['BOJ', 'BLL', '12.12.1734'],
                     ['SOD', 'VAD', '22.07.2019', '29.07.2019'],
