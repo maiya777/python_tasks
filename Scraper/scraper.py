@@ -2,13 +2,26 @@
 
 from datetime import datetime
 from decimal import Decimal
+import re
 import requests
 from lxml import html
+
 
 URL = 'https://apps.penguin.bg/fly/quote3.aspx'
 AIRPORTS_URL = 'http://www.flybulgarien.dk/en/'
 DATAPARAMS = {'lang': 'en', 'paxcount': '1', 'infcount': ''}
 
+class DataError(Exception):
+    """This exception is raised when requested airports are not available
+    on site or incorrect date requested"""
+
+    pass
+
+class FlightNotFound(Exception):
+    """This exception is raised when flights are not found in at least
+    one direction"""
+
+    pass
 
 class Scraper(object):
     """This class receives, sort and print
@@ -32,23 +45,6 @@ class Scraper(object):
         self.converted_flight_list = None
         self.result_flight_list = None
 
-    class FlightNotFound(Exception):
-        """This exception is raised when flights are not found in at least
-        one direction."""
-
-        pass
-
-    class WrongContentException(Exception):
-        """This exception is raised when unexpected content received"""
-
-        pass
-
-    class AirportCodeError(Exception):
-        """This exception is raised when requested airports are not available
-        on site"""
-
-        pass
-
     @staticmethod
     def get_response_text(url, parametres=''):
         """This function receives and returns a response from the site"""
@@ -66,7 +62,8 @@ class Scraper(object):
         airports_list = parsed.xpath(path)
         depature_airports_set = set(filter(None, airports_list))
         if self.data_params['aptcode1'] not in depature_airports_set:
-            raise self.AirportCodeError
+            raise DataError('Requested airports '
+                            'are not available or do not exist\n')
         arr_airports_url = (self.airports_url[:-3] + 'script/getcity/2-' +
                             self.data_params['aptcode1'])
         arrival_airports = Scraper.get_response_text(arr_airports_url)
@@ -75,7 +72,25 @@ class Scraper(object):
         for airport in arrival_airports:
             arrival_airports_list.append(airport.strip('{}\n\t"')[:3])
         if self.data_params['aptcode2'] not in arrival_airports_list:
-            raise self.AirportCodeError
+            raise DataError('Requested airports '
+                            'are not available or do not exist\n')
+
+    def check_date_format(self):
+        """This function checks the fotmat of the requested date and
+        time to flight less than a year"""
+
+        exp = r'[0123]\d\.[01]\d\.20\d\d'
+        dates = [self.data_params['depdate']]
+        now = datetime.now()
+        if 'rtdate' in self.data_params:
+            dates.append(self.data_params['rtdate'])
+        for date in dates:
+            if re.match(exp, date):
+                flight_delta = datetime.strptime(date, '%d.%m.%Y') - now
+                if flight_delta.days > 365 or flight_delta.days < 0:
+                    raise DataError('Incorrect date format\n')
+            else:
+                raise DataError('Incorrect date format\n')
 
     def parse_flights_table(self):
         """This function finds and saves all the cells of the table with available
@@ -92,26 +107,31 @@ class Scraper(object):
                 tr_list.append(td_list)
                 for t_d in tr_element.xpath('td/text()'):
                     if 'No available flights found.' in t_d:
-                        raise self.FlightNotFound
+                        raise FlightNotFound
                     td_list.append(t_d.strip())
 
-        except Scraper.FlightNotFound:
+        except FlightNotFound:
             self.flight_notfound_flag = True
 
         return tr_list
 
     @staticmethod
     def normalize_flights_list(row_lst):
-        """This function deletes all empty cells and cells with empty elements
-        and also combines lines of two, so that one list item corresponds
-        to one flight"""
+        """This function deletes all empty cells, cells with empty elements
+        and extra messages and also combines lines of two, so that one list
+        item corresponds to one flight"""
 
         tr_list = [tr for tr in row_lst if tr and all(tr)]
         tr_list = [tr + tr_list[tr_list.index(tr) + 1] for tr in tr_list[::2]]
+        luggage_mes = 'NO LUGGAGE INCLUDED IN THE PRICE'
+        for i, t_r in enumerate(tr_list):
+            if luggage_mes in t_r:
+                tr_list[i].remove(luggage_mes)
         return tr_list
 
     def get_flights_list(self):
         """This function gets and returns flight list"""
+
         return Scraper.normalize_flights_list(self.parse_flights_table())
 
     def sort_flights_list(self, flights_lst):
@@ -134,16 +154,20 @@ class Scraper(object):
             else:
                 rtdate = None
 
-            if (date == depdate and
-                    self.data_params['aptcode1'] in flight[3] or
-                    date == rtdate and
-                    self.data_params['aptcode2'] in flight[3]):
+            is_dep_data_correct = (date == depdate and
+                                   self.data_params['aptcode1'] in flight[3]
+                                   and self.data_params['aptcode2'] in flight[4])
+            is_rt_data_correct = (date == rtdate and
+                                  self.data_params['aptcode2'] in flight[3]
+                                  and self.data_params['aptcode1'] in flight[4])
+            if is_dep_data_correct or is_rt_data_correct:
 
                 for flight_time in (flight[1], flight[2]):
                     date = date.replace(hour=int(flight_time[:2]),
                                         minute=int(flight_time[3:]))
                     flight.append(date)
-
+                if flight[-1].time() < flight[-2].time():
+                    flight[-1] = flight[-1].replace(day=(flight[-1].day + 1))
                 flight[5] = flight[5].split()[1:]
                 flight[5][0] = Decimal(flight[5][0])
                 del flight[:3]  # deleting old format data from flight the list
@@ -165,12 +189,12 @@ class Scraper(object):
                      arr_time, flight_dur):
         """This function prints one formatted line from the flight table"""
 
-        print ("From: {:<25} Departure: {} \nTo: {:<27} Arrival:   {}\n\
-Flight duration: {}".format(dep_airport,
-                            dep_time.strftime('%a, %d %B %Y, %H:%M'),
-                            arr_airport,
-                            arr_time.strftime('%a, %d %B %Y, %H:%M'),
-                            str(flight_dur)[:-3]))
+        print ('From: {:<25} Departure: {} \nTo: {:<27} Arrival:   {}\n'
+               'Flight duration: {}'.format(dep_airport,
+                                            dep_time.strftime('%a, %d %B %Y, %H:%M'),
+                                            arr_airport,
+                                            arr_time.strftime('%a, %d %B %Y, %H:%M'),
+                                            str(flight_dur)[:-3]))
 
     def print_flights(self):
         """This function calls other functions for building flight list,
@@ -179,12 +203,18 @@ Flight duration: {}".format(dep_airport,
 
         try:
             self.check_available_airports()
+            self.check_date_format()
             self.sort_flights_list(self.get_flights_list())
-            if self.flight_notfound_flag:
-                mes1 = "Flights found only in one direction:\n"
-                mes2 = "No available flights found!\n"
-                mes = mes1 if self.converted_flight_list else mes2
-                print mes
+
+            if 'rtdate' not in self.data_params:
+                if (not self.converted_flight_list
+                        or self.flight_notfound_flag):
+                    print "No available flights found!\n"
+            elif (self.converted_flight_list and
+                  not self.result_flight_list):
+                print "Flights found only in one direction:\n"
+            elif not self.converted_flight_list:
+                print "No available flights found!\n"
 
             if self.result_flight_list:
                 for flight in sorted(self.result_flight_list,
@@ -202,29 +232,21 @@ Flight duration: {}".format(dep_airport,
                                          flight[4], flight[4] - flight[3])
                     print "Total cost: {} {}\n".format(flight[2][0],
                                                        flight[2][1])
-            elif not self.flight_notfound_flag:
-                raise self.WrongContentException
-        except requests.exceptions.HTTPError:
-            print 'HTTP Error occured!'
-        except requests.exceptions.ConnectionError:
-            print 'Connection Error occured!'
-        except requests.exceptions.RequestException:
-            print 'Network Connection Error!'
-        except self.WrongContentException:
-            print 'Unexpected content. \n\
-Apparently, incorrect request parameters\n'
-        except self.AirportCodeError:
-            print 'Requested airports are not available or do not exist\n'
+        except requests.exceptions.RequestException as exp:
+            print exp
+        except DataError as exp:
+            print exp
 
 
 if __name__ == '__main__':
 
     FLIGHTS_DATA = [['BOJ', 'BLL', '22.07.2019', '29.07.2019'],
                     ['CPH', 'BOJ', '17.07.2019'],
-                    ['BOJ', 'CPH', '27.06.2019', '02.07.2030'],
+                    ['BOJ', 'CPH', '27.06.2019', '02.07.2019'],
                     ['##', '^^^', '$$$$', '&&&&&'],
-                    ['BOJ', 'BLL', '12.12.1734'],
+                    ['BOJ', 'BLL', '12.2019'],
                     ['SOD', 'VAD', '22.07.2019', '29.07.2019'],
+                    ['BOJ', 'BLL', '10.07.2019', '11.07.2019'],
                     ['BOJ', 'BLL', '22.07.2019', '23.07.2019'],
                     ['BOJ', 'BLL', '22.07.2019', '29.07.2019', '30.08.2019']]
 
@@ -233,4 +255,5 @@ if __name__ == '__main__':
             scrp = Scraper(*flight_data).print_flights()
             print "-" * 40 + '\n'
         except TypeError:
-            print 'You entered incorrect number of parameters, try again!'
+            print 'You entered incorrect number of parameters, try again!\n'
+            print "-" * 40 + '\n'
