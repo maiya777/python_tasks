@@ -11,17 +11,20 @@ URL = 'https://apps.penguin.bg/fly/quote3.aspx'
 AIRPORTS_URL = 'http://www.flybulgarien.dk/en/'
 DATAPARAMS = {'lang': 'en', 'paxcount': '1', 'infcount': ''}
 
+
 class DataError(Exception):
     """This exception is raised when requested airports are not available
     on site or incorrect date requested"""
 
     pass
 
+
 class FlightNotFound(Exception):
     """This exception is raised when flights are not found in at least
     one direction"""
 
     pass
+
 
 class Scraper(object):
     """This class receives, sort and print
@@ -88,7 +91,7 @@ class Scraper(object):
             if re.match(exp, date):
                 flight_delta = datetime.strptime(date, '%d.%m.%Y') - now
                 if flight_delta.days > 365 or flight_delta.days < 0:
-                    raise DataError('Incorrect date format\n')
+                    raise DataError('Dates are not available\n')
             else:
                 raise DataError('Incorrect date format\n')
 
@@ -252,7 +255,7 @@ if __name__ == '__main__':
 
     for flight_data in FLIGHTS_DATA:
         try:
-            scrp = Scraper(*flight_data).print_flights()
+            Scraper(*flight_data).print_flights()
             print "-" * 40 + '\n'
         except TypeError:
             print 'You entered incorrect number of parameters, try again!\n'
